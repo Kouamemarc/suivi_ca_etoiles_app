@@ -4,25 +4,39 @@ import numpy as np
 import altair as alt
 from io import BytesIO
 
+# -------------------- CONFIG GLOBALE --------------------
+
 st.set_page_config(
     page_title="Dashboard Closes Amiens & Beauvais",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ---------- Chargement & état ----------
+# Objectifs
+OBJECTIFS_CA_CLOSE = {
+    "Amiens": 350,
+    "Beauvais": 200,
+}
+OBJECTIF_NOTE = 4.5
+
+DATA_PATH = "suivi_close_amiens_beauvais.xlsx"  # fichier lu au lancement
+
+
+# -------------------- FONCTIONS --------------------
+
 
 @st.cache_data
-def load_data(file):
-    xls = pd.ExcelFile(file)
+def load_data_from_excel(path: str):
+    xls = pd.ExcelFile(path)
     df_ca = pd.read_excel(xls, "CA_Close")
     df_notes = pd.read_excel(xls, "Évolution_Notes")
+
     df_ca["Date"] = pd.to_datetime(df_ca["Date"])
     df_notes["Date"] = pd.to_datetime(df_notes["Date"])
     return df_ca, df_notes
 
 
-def compute_duration_hours(period_str):
+def compute_duration_hours(period_str: str) -> float:
     """Calcule la durée en heures à partir d'une chaîne du type '23:00 - 00:00'."""
     try:
         start_str, end_str = [s.strip() for s in period_str.split("-")]
@@ -36,7 +50,7 @@ def compute_duration_hours(period_str):
     return delta
 
 
-def add_ca_horaire(df_ca):
+def add_ca_horaire(df_ca: pd.DataFrame) -> pd.DataFrame:
     df = df_ca.copy()
     df["Duree (h)"] = df["Période de close"].apply(compute_duration_hours)
     df["CA horaire (€ / h)"] = df["Chiffre d’affaires (€)"] / df["Duree (h)"]
@@ -44,7 +58,7 @@ def add_ca_horaire(df_ca):
     return df
 
 
-def build_excel_bytes(df_ca, df_notes):
+def build_excel_bytes(df_ca: pd.DataFrame, df_notes: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df_ca.to_excel(writer, sheet_name="CA_Close", index=False)
@@ -53,33 +67,24 @@ def build_excel_bytes(df_ca, df_notes):
     return buffer.read()
 
 
+# -------------------- CHARGEMENT DES DONNÉES --------------------
+
+
 st.sidebar.title("⚙️ Paramètres")
 
-file = st.sidebar.file_uploader(
-    "Fichier de données (Excel)",
-    type=["xlsx"],
-    help="Charge ton fichier 'suivi_close_amiens_beauvais.xlsx'",
-)
+st.sidebar.markdown("📡 Source des données : **fichier Excel du projet**")
+st.sidebar.code(DATA_PATH, language="text")
 
-if file is None:
-    st.info("Charge ton fichier Excel pour commencer.")
-    st.stop()
-
-# Gérer les dataframes dans l'état de session pour conserver la saisie
-if (
-    "df_ca" not in st.session_state
-    or "df_notes" not in st.session_state
-    or st.session_state.get("file_name") != file.name
-):
-    df_ca_raw, df_notes_raw = load_data(file)
+# Chargement initial (depuis le fichier du repo)
+if "df_ca" not in st.session_state or "df_notes" not in st.session_state:
+    df_ca_raw, df_notes_raw = load_data_from_excel(DATA_PATH)
     st.session_state["df_ca"] = add_ca_horaire(df_ca_raw)
     st.session_state["df_notes"] = df_notes_raw.copy()
-    st.session_state["file_name"] = file.name
 
 df_ca = st.session_state["df_ca"]
 df_notes = st.session_state["df_notes"]
 
-# ---------- Filtres globaux ----------
+# -------------------- FILTRES GLOBAUX --------------------
 
 mode = st.sidebar.selectbox(
     "Mode",
@@ -99,7 +104,7 @@ date_deb, date_fin = st.sidebar.date_input(
     max_value=max_date.date(),
 )
 
-# ---------- MODE ANALYSE ----------
+# -------------------- MODE ANALYSE --------------------
 
 if mode == "Analyse":
     section = st.sidebar.radio(
@@ -134,7 +139,21 @@ if mode == "Analyse":
         total_cmd = df_ca_f["Nombre commandes"].sum()
         panier_moy = total_ca / total_cmd if total_cmd > 0 else np.nan
         ca_horaire_moy = df_ca_f["CA horaire (€ / h)"].mean()
-        cmd_horaire_moy = df_ca_f["Cmd horaires"].mean()
+
+        # Objectif CA pour la ville sélectionnée
+        objectif_ca = None
+        if ville_sel in OBJECTIFS_CA_CLOSE:
+            objectif_ca = OBJECTIFS_CA_CLOSE[ville_sel]
+
+        if objectif_ca is not None:
+            df_ca_f["OK_objectif_CA"] = (
+                df_ca_f["Chiffre d’affaires (€)"] >= objectif_ca
+            )
+            nb_ok = int(df_ca_f["OK_objectif_CA"].sum())
+            nb_total = len(df_ca_f)
+            pct_ok = 100 * nb_ok / nb_total if nb_total > 0 else 0
+        else:
+            nb_ok = nb_total = pct_ok = None
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("CA total (€)", f"{total_ca:,.0f}".replace(",", " "))
@@ -147,6 +166,14 @@ if mode == "Analyse":
             "CA horaire moyen (€ / h)",
             f"{ca_horaire_moy:,.2f}" if not np.isnan(ca_horaire_moy) else "NA",
         )
+
+        if objectif_ca is not None:
+            st.markdown(
+                f"🎯 **Objectif CA close {ville_sel} : {objectif_ca} € par close**"
+            )
+            st.markdown(
+                f"- Closes ≥ objectif : **{nb_ok} / {nb_total}** ({pct_ok:.1f} %)"
+            )
 
         st.markdown("### 🏆 Top périodes de close (par CA horaire)")
         top_periods = (
@@ -263,6 +290,20 @@ if mode == "Analyse":
         col1.metric("Note moyenne Uber Eats", f"{moy_uber:.2f}")
         col2.metric("Note moyenne Deliveroo", f"{moy_deliv:.2f}")
 
+        # Objectif étoiles 4.5 pour tout
+        df_notes_m["OK_objectif_note"] = (
+            (df_notes_m["Note Uber Eats"] >= OBJECTIF_NOTE)
+            & (df_notes_m["Note Deliveroo"] >= OBJECTIF_NOTE)
+        )
+        nb_ok_note = int(df_notes_m["OK_objectif_note"].sum())
+        nb_total_note = len(df_notes_m)
+        pct_ok_note = 100 * nb_ok_note / nb_total_note if nb_total_note > 0 else 0
+
+        st.markdown(f"🎯 **Objectif étoiles : {OBJECTIF_NOTE} minimum (Uber & Deliveroo)**")
+        st.markdown(
+            f"- Lignes ≥ objectif : **{nb_ok_note} / {nb_total_note}** ({pct_ok_note:.1f} %)"
+        )
+
         st.markdown("### 🏅 Performance par marque (moyenne sur la période)")
         perf_marques = (
             df_notes_f.groupby(["Ville", "Marque"], as_index=False)[
@@ -308,7 +349,7 @@ if mode == "Analyse":
             use_container_width=True,
         )
 
-# ---------- MODE SAISIE DES DONNÉES ----------
+# -------------------- MODE SAISIE DES DONNÉES --------------------
 
 else:
     st.title("📝 Saisie / mise à jour des données")
@@ -360,7 +401,7 @@ else:
             df_ca_new = add_ca_horaire(df_ca_new)
             st.session_state["df_ca"] = df_ca_new
             df_ca = df_ca_new
-            st.success("✅ Ligne CA_Close ajoutée.")
+            st.success("✅ Ligne CA_Close ajoutée (mémoire session).")
 
     # --- Formulaire Évolution_Notes ---
     with tab2:
@@ -400,7 +441,7 @@ else:
             )
             st.session_state["df_notes"] = df_notes_new
             df_notes = df_notes_new
-            st.success("✅ Ligne Évolution_Notes ajoutée.")
+            st.success("✅ Ligne Évolution_Notes ajoutée (mémoire session).")
 
     st.markdown("### 💾 Télécharger les données mises à jour")
     updated_bytes = build_excel_bytes(df_ca, df_notes)
