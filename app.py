@@ -19,7 +19,7 @@ OBJECTIFS_CA_CLOSE = {
 }
 OBJECTIF_NOTE = 4.5
 
-DATA_PATH = "suivi_close_amiens_beauvais.xlsx"  # fichier lu au lancement
+DATA_PATH = "suivi_ca_etoile_v2.xlsx"  # fichier lu au lancement
 
 
 # -------------------- FONCTIONS --------------------
@@ -27,14 +27,18 @@ DATA_PATH = "suivi_close_amiens_beauvais.xlsx"  # fichier lu au lancement
 
 @st.cache_data
 def load_data_from_excel(path: str):
-    xls = pd.ExcelFile(path)
+    try:
+        xls = pd.ExcelFile(path)
+    except FileNotFoundError:
+        st.error(f"❌ Fichier de données introuvable : {path}")
+        st.info("Vérifie que le fichier est présent dans le même dossier que app.py (et poussé sur GitHub).")
+        st.stop()
+
     df_ca = pd.read_excel(xls, "CA_Close")
     df_notes = pd.read_excel(xls, "Évolution_Notes")
-
     df_ca["Date"] = pd.to_datetime(df_ca["Date"])
     df_notes["Date"] = pd.to_datetime(df_notes["Date"])
     return df_ca, df_notes
-
 
 def compute_duration_hours(period_str: str) -> float:
     """Calcule la durée en heures à partir d'une chaîne du type '23:00 - 00:00'."""
