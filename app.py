@@ -3,23 +3,37 @@ import pandas as pd
 import numpy as np
 import altair as alt
 from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from datetime import datetime
 
 # -------------------- CONFIG GLOBALE --------------------
 
 st.set_page_config(
     page_title="Dashboard Closes Amiens & Beauvais",
-    layout="wide",
+    layout="centered",  # un peu plus friendly mobile
     initial_sidebar_state="expanded",
 )
 
-# Objectifs
-OBJECTIFS_CA_CLOSE = {
-    "Amiens": 350,
-    "Beauvais": 200,
-}
-OBJECTIF_NOTE = 4.5
+# Fichier de données lu au lancement
+DATA_PATH = "suivi_ca_etoile_v2.xlsx"  # doit être à côté de app.py
 
-DATA_PATH = "suivi_ca_etoile_v2.xlsx"  # fichier lu au lancement
+
+# -------------------- OBJECTIFS (avec valeurs par défaut) --------------------
+
+
+def init_objectifs():
+    if "objectifs" not in st.session_state:
+        st.session_state["objectifs"] = {
+            "CA_close": {
+                "Amiens": 350.0,
+                "Beauvais": 200.0,
+            },
+            "note_min": 4.5,
+        }
+
+
+init_objectifs()
 
 
 # -------------------- FONCTIONS --------------------
@@ -31,14 +45,19 @@ def load_data_from_excel(path: str):
         xls = pd.ExcelFile(path)
     except FileNotFoundError:
         st.error(f"❌ Fichier de données introuvable : {path}")
-        st.info("Vérifie que le fichier est présent dans le même dossier que app.py (et poussé sur GitHub).")
+        st.info(
+            "Vérifie que le fichier est présent dans le même dossier que app.py "
+            "et bien poussé sur GitHub / Streamlit Cloud."
+        )
         st.stop()
 
     df_ca = pd.read_excel(xls, "CA_Close")
     df_notes = pd.read_excel(xls, "Évolution_Notes")
+
     df_ca["Date"] = pd.to_datetime(df_ca["Date"])
     df_notes["Date"] = pd.to_datetime(df_notes["Date"])
     return df_ca, df_notes
+
 
 def compute_duration_hours(period_str: str) -> float:
     """Calcule la durée en heures à partir d'une chaîne du type '23:00 - 00:00'."""
@@ -71,15 +90,88 @@ def build_excel_bytes(df_ca: pd.DataFrame, df_notes: pd.DataFrame) -> bytes:
     return buffer.read()
 
 
+def build_pdf_report(df_ca_f, df_notes_f, ville_sel, date_deb, date_fin):
+    """
+    Génère un PDF simple de synthèse (KPI & objectifs).
+    """
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    y = height - 50
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, y, "Synthèse Closes Amiens & Beauvais")
+    y -= 25
+    c.setFont("Helvetica", 10)
+    c.drawString(
+        40,
+        y,
+        f"Période : {date_deb.strftime('%d/%m/%Y')} - {date_fin.strftime('%d/%m/%Y')}   |   Filtre ville : {ville_sel}",
+    )
+    y -= 30
+
+    # Objectifs
+    obj = st.session_state["objectifs"]
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "Objectifs")
+    y -= 18
+    c.setFont("Helvetica", 10)
+    c.drawString(
+        50,
+        y,
+        f"CA close Amiens ≥ {obj['CA_close']['Amiens']} €  |  CA close Beauvais ≥ {obj['CA_close']['Beauvais']} €",
+    )
+    y -= 15
+    c.drawString(50, y, f"Notes (Uber & Deliveroo) ≥ {obj['note_min']}")
+    y -= 30
+
+    # KPI CA
+    if not df_ca_f.empty:
+        total_ca = df_ca_f["Chiffre d’affaires (€)"].sum()
+        total_cmd = df_ca_f["Nombre commandes"].sum()
+        panier_moy = total_ca / total_cmd if total_cmd > 0 else np.nan
+
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, "KPI CA & commandes")
+        y -= 18
+        c.setFont("Helvetica", 10)
+        c.drawString(50, y, f"CA total : {total_ca:.0f} €")
+        y -= 15
+        c.drawString(50, y, f"Nombre de commandes : {int(total_cmd)}")
+        y -= 15
+        c.drawString(
+            50,
+            y,
+            f"Panier moyen : {panier_moy:.2f} €" if not np.isnan(panier_moy) else "Panier moyen : NA",
+        )
+        y -= 25
+
+    # KPI notes
+    if not df_notes_f.empty:
+        moy_uber = df_notes_f["Note Uber Eats"].mean()
+        moy_deliv = df_notes_f["Note Deliveroo"].mean()
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y, "KPI Notes")
+        y -= 18
+        c.setFont("Helvetica", 10)
+        c.drawString(50, y, f"Note moyenne Uber Eats : {moy_uber:.2f}")
+        y -= 15
+        c.drawString(50, y, f"Note moyenne Deliveroo : {moy_deliv:.2f}")
+        y -= 25
+
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 # -------------------- CHARGEMENT DES DONNÉES --------------------
 
 
 st.sidebar.title("⚙️ Paramètres")
-
 st.sidebar.markdown("📡 Source des données : **fichier Excel du projet**")
 st.sidebar.code(DATA_PATH, language="text")
 
-# Chargement initial (depuis le fichier du repo)
 if "df_ca" not in st.session_state or "df_notes" not in st.session_state:
     df_ca_raw, df_notes_raw = load_data_from_excel(DATA_PATH)
     st.session_state["df_ca"] = add_ca_horaire(df_ca_raw)
@@ -92,8 +184,8 @@ df_notes = st.session_state["df_notes"]
 
 mode = st.sidebar.selectbox(
     "Mode",
-    ["Analyse", "Saisie des données"],
-    help="Choisis 'Analyse' pour consulter le dashboard ou 'Saisie des données' pour ajouter des lignes.",
+    ["Analyse", "Objectifs", "Saisie des données"],
+    help="Analyse = dashboard, Objectifs = configuration, Saisie = ajout de données.",
 )
 
 villes = ["Toutes"] + sorted(df_ca["Ville"].dropna().unique().tolist())
@@ -108,9 +200,55 @@ date_deb, date_fin = st.sidebar.date_input(
     max_value=max_date.date(),
 )
 
+objectifs = st.session_state["objectifs"]
+
+# -------------------- MODE OBJECTIFS --------------------
+
+if mode == "Objectifs":
+    st.title("🎯 Paramétrage des objectifs")
+
+    st.markdown("## Objectifs CA close par ville")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        obj_amiens = st.number_input(
+            "Objectif CA close Amiens (€)",
+            min_value=0.0,
+            step=10.0,
+            value=float(objectifs["CA_close"]["Amiens"]),
+        )
+    with col2:
+        obj_beauvais = st.number_input(
+            "Objectif CA close Beauvais (€)",
+            min_value=0.0,
+            step=10.0,
+            value=float(objectifs["CA_close"]["Beauvais"]),
+        )
+
+    st.markdown("## Objectif notes (étoiles)")
+
+    obj_note = st.number_input(
+        "Objectif note minimale (Uber & Deliveroo)",
+        min_value=0.0,
+        max_value=5.0,
+        step=0.1,
+        value=float(objectifs["note_min"]),
+    )
+
+    if st.button("💾 Enregistrer les objectifs pour cette session"):
+        st.session_state["objectifs"]["CA_close"]["Amiens"] = obj_amiens
+        st.session_state["objectifs"]["CA_close"]["Beauvais"] = obj_beauvais
+        st.session_state["objectifs"]["note_min"] = obj_note
+        st.success("✅ Objectifs mis à jour pour cette session.")
+
+    st.info(
+        "Ces objectifs sont mémorisés tant que ta session Streamlit reste ouverte. "
+        "Pour une persistance plus longue, on pourra plus tard les stocker dans un Google Sheets ou une base."
+    )
+
 # -------------------- MODE ANALYSE --------------------
 
-if mode == "Analyse":
+elif mode == "Analyse":
     section = st.sidebar.radio(
         "Section",
         ["CA & commandes closes", "Évolution des notes (étoiles)"],
@@ -146,37 +284,37 @@ if mode == "Analyse":
 
         # Objectif CA pour la ville sélectionnée
         objectif_ca = None
-        if ville_sel in OBJECTIFS_CA_CLOSE:
-            objectif_ca = OBJECTIFS_CA_CLOSE[ville_sel]
+        if ville_sel in objectifs["CA_close"]:
+            objectif_ca = objectifs["CA_close"][ville_sel]
 
+        # Statut objectif par ligne + % OK
         if objectif_ca is not None:
-            df_ca_f["OK_objectif_CA"] = (
-                df_ca_f["Chiffre d’affaires (€)"] >= objectif_ca
-            )
+            df_ca_f["OK_objectif_CA"] = df_ca_f["Chiffre d’affaires (€)"] >= objectif_ca
             nb_ok = int(df_ca_f["OK_objectif_CA"].sum())
             nb_total = len(df_ca_f)
             pct_ok = 100 * nb_ok / nb_total if nb_total > 0 else 0
         else:
             nb_ok = nb_total = pct_ok = None
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2 = st.columns(2)
+        col3, col4 = st.columns(2)
+
         col1.metric("CA total (€)", f"{total_ca:,.0f}".replace(",", " "))
         col2.metric("Nombre de commandes", int(total_cmd))
         col3.metric(
             "Panier moyen (€)",
-            f"{panier_moy:,.2f}" if not np.isnan(panier_moy) else "NA",
+            f"{panier_moy:.2f}" if not np.isnan(panier_moy) else "NA",
         )
         col4.metric(
             "CA horaire moyen (€ / h)",
-            f"{ca_horaire_moy:,.2f}" if not np.isnan(ca_horaire_moy) else "NA",
+            f"{ca_horaire_moy:.2f}" if not np.isnan(ca_horaire_moy) else "NA",
         )
 
         if objectif_ca is not None:
+            emoji = "🟢" if pct_ok >= 80 else "🟡" if pct_ok >= 50 else "🔴"
             st.markdown(
-                f"🎯 **Objectif CA close {ville_sel} : {objectif_ca} € par close**"
-            )
-            st.markdown(
-                f"- Closes ≥ objectif : **{nb_ok} / {nb_total}** ({pct_ok:.1f} %)"
+                f"**Objectif CA close {ville_sel} : {objectif_ca} € par close**  "
+                f"→ Closes ≥ objectif : **{nb_ok} / {nb_total}** ({pct_ok:.1f} %) {emoji}"
             )
 
         st.markdown("### 🏆 Top périodes de close (par CA horaire)")
@@ -266,11 +404,33 @@ if mode == "Analyse":
         )
         st.altair_chart(heat_chart, use_container_width=True)
 
-        st.markdown("### 📊 Détail des données (avec CA horaire)")
+        st.markdown("### 📊 Détail des données (avec CA horaire & statut objectif)")
+
+        if objectif_ca is not None:
+            df_ca_show = df_ca_f.copy()
+            df_ca_show["Statut objectif CA"] = np.where(
+                df_ca_show["OK_objectif_CA"], "🟢 OK", "🔴 Sous objectif"
+            )
+        else:
+            df_ca_show = df_ca_f.copy()
+
         st.dataframe(
-            df_ca_f.sort_values(["Date", "Ville", "Période de close"]),
+            df_ca_show.sort_values(["Date", "Ville", "Période de close"]),
             use_container_width=True,
         )
+
+        # PDF report
+        st.markdown("### 🧾 Export PDF synthèse")
+        if st.button("Générer un PDF de synthèse"):
+            pdf_bytes = build_pdf_report(
+                df_ca_f, df_notes_f, ville_sel, pd.to_datetime(date_deb), pd.to_datetime(date_fin)
+            )
+            st.download_button(
+                label="📥 Télécharger le PDF",
+                data=pdf_bytes,
+                file_name=f"rapport_closes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+            )
 
     # --------- PAGE NOTES / MARQUES ---------
     else:
@@ -294,18 +454,20 @@ if mode == "Analyse":
         col1.metric("Note moyenne Uber Eats", f"{moy_uber:.2f}")
         col2.metric("Note moyenne Deliveroo", f"{moy_deliv:.2f}")
 
-        # Objectif étoiles 4.5 pour tout
+        # Objectif étoiles
+        note_min = objectifs["note_min"]
         df_notes_m["OK_objectif_note"] = (
-            (df_notes_m["Note Uber Eats"] >= OBJECTIF_NOTE)
-            & (df_notes_m["Note Deliveroo"] >= OBJECTIF_NOTE)
+            (df_notes_m["Note Uber Eats"] >= note_min)
+            & (df_notes_m["Note Deliveroo"] >= note_min)
         )
         nb_ok_note = int(df_notes_m["OK_objectif_note"].sum())
         nb_total_note = len(df_notes_m)
         pct_ok_note = 100 * nb_ok_note / nb_total_note if nb_total_note > 0 else 0
 
-        st.markdown(f"🎯 **Objectif étoiles : {OBJECTIF_NOTE} minimum (Uber & Deliveroo)**")
+        emoji_note = "🟢" if pct_ok_note >= 80 else "🟡" if pct_ok_note >= 50 else "🔴"
         st.markdown(
-            f"- Lignes ≥ objectif : **{nb_ok_note} / {nb_total_note}** ({pct_ok_note:.1f} %)"
+            f"**Objectif étoiles : {note_min} minimum (Uber & Deliveroo)**  "
+            f"→ Lignes ≥ objectif : **{nb_ok_note} / {nb_total_note}** ({pct_ok_note:.1f} %) {emoji_note}"
         )
 
         st.markdown("### 🏅 Performance par marque (moyenne sur la période)")
@@ -347,9 +509,13 @@ if mode == "Analyse":
 
         st.altair_chart(notes_chart, use_container_width=True)
 
-        st.markdown("### 📊 Détail des données")
+        st.markdown("### 📊 Détail des données (avec statut objectif)")
+        df_notes_show = df_notes_m.copy()
+        df_notes_show["Statut objectif notes"] = np.where(
+            df_notes_show["OK_objectif_note"], "🟢 OK", "🔴 Sous objectif"
+        )
         st.dataframe(
-            df_notes_m.sort_values(["Date", "Ville", "Marque"]),
+            df_notes_show.sort_values(["Date", "Ville", "Marque"]),
             use_container_width=True,
         )
 
